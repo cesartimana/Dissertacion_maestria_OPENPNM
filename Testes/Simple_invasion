@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Feb  1 12:05:36 2023
+
+@author: cesar
+"""
+
+import openpnm as op
+import numpy as np
+import matplotlib.pyplot as plt
+op.visualization.set_mpl_style()
+
+np.random.seed(9)
+pn = op.network.Demo(shape=[4, 1, 1], spacing=1e-4)
+air = op.phase.Air(network=pn)
+
+air['pore.contact_angle'] = 120
+air['pore.surface_tension'] = 0.072
+f = op.models.physics.capillary_pressure.washburn
+air.add_model(propname='throat.entry_pressure',
+              model=f, 
+              surface_tension='throat.surface_tension',
+              contact_angle='throat.contact_angle',
+              diameter='throat.diameter',)
+
+print(air['throat.entry_pressure'])
+
+drn = op.algorithms.Drainage(network=pn, phase=air)
+drn.set_inlet_BC(pores=pn.pores('left'))
+drn.run()
+
+print(drn)
+
+inv_pattern = drn['throat.invasion_pressure'] < 15000
+
+ax = op.visualization.plot_coordinates(network=pn, pores=pn.pores('left'), c='r', s=50)
+ax = op.visualization.plot_coordinates(network=pn, pores=pn.pores('left', mode='not'), c='grey', ax=ax)
+op.visualization.plot_connections(network=pn, throats=inv_pattern, ax=ax);
+
+print(drn['throat.invasion_sequence'])

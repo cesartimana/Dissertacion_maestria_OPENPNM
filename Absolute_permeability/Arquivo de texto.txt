@@ -1,0 +1,4 @@
+ 
+Professor: Tenho dois comentarios:
+1) Acho que uma diferença importante é a versão usada para o watershed do PoreSpy(porque essa função é de outro pacote de python). Por tanto, posso ter resultados semelhantes mas não exatamente iguais.
+2) Posso criar poros de contorno grandes? O PoreSpy normalmente cria um contorno de 3 voxels e com esse contorno. Pensava criar usando 10 voxels de contorno.

@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Jan 31 11:13:36 2023
+
+@author: cesar
+"""
+
+import openpnm as op
+import numpy as np
+import matplotlib.pyplot as plt
+op.visualization.set_mpl_style()
+
+np.random.seed(5)
+pn = op.network.Demo(shape=[25, 25, 1], spacing=1e-4)
+air = op.phase.Air(network=pn)
+
+air['pore.contact_angle'] = 120
+air['pore.surface_tension'] = 0.072
+f = op.models.physics.capillary_pressure.washburn #use r and tension in SI, presure in Pa
+air.add_model(propname='throat.entry_pressure',
+              model=f, 
+              surface_tension='throat.surface_tension',
+              contact_angle='throat.contact_angle',
+              diameter='throat.diameter',)
+'''
+
+print(pn['throat.diameter'])
+
+print(air['pore.pressure'])
+print(air['throat.entry_pressure'])
+'''
+drn = op.algorithms.Drainage(network=pn, phase=air)
+drn.set_inlet_BC(pores=pn.pores('left'))
+drn.run()
+'''
+print(drn['pore.invasion_pressure'])
+print(drn['throat.invasion_pressure'])
+print(drn['pore.invasion_sequence'])
+print(drn['throat.invasion_sequence'])
+'''
+
+inv_pattern = drn['throat.invasion_pressure'] < 9000
+
+ax = op.visualization.plot_coordinates(network=pn, pores=pn.pores('left'), c='r', s=50)
+ax = op.visualization.plot_coordinates(network=pn, pores=pn.pores('left', mode='not'), c='grey', ax=ax)
+op.visualization.plot_connections(network=pn, throats=inv_pattern, ax=ax);
+
+
+drn.set_outlet_BC(pores=pn.pores('right'), mode='overwrite')
+drn.apply_trapping()
+inv_pattern = drn['throat.invasion_pressure'] < 9000
+ax = op.visualization.plot_coordinates(network=pn, pores=pn.pores('left'), c='r', s=50)
+ax = op.visualization.plot_coordinates(network=pn, pores=pn.pores('left', mode='not'), c='grey', ax=ax)
+op.visualization.plot_connections(network=pn, throats=inv_pattern, ax=ax);
+
+
+from scipy.sparse import csgraph as csg
+Pc = air['throat.entry_pressure'].mean()
+Ts = 1.0*(air['throat.entry_pressure'] < 0.8*Pc) # 1 if value is less than 0,8*Pc. Invasion ocurrs
+am = pn.create_adjacency_matrix(weights=Ts, fmt='csr', triu=False, drop_zeros=True)
+clusters = csg.connected_components(am, directed=False)[1]
+print(clusters)
+
+invaded_pores = np.isin(clusters, clusters[pn.pores('left')])
+ax = op.visualization.plot_coordinates(network=pn, color_by=invaded_pores, s=40, cmap=plt.cm.viridis)
+ax = op.visualization.plot_connections(network=pn, c='lightgrey', ax=ax);

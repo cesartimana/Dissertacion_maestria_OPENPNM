@@ -1,0 +1,42 @@
+Sobre las clases, info general:
+__init__ es el "metodo constructor ". Es decir, si crear un objeto con dicha clase, esa funcion automaticamente se activa sin que la llames.
+super() es para hacer que una clase herede las propiedades y metodos de otra clase
+
+Al crear una fase, esta adquiere propiedadades de otras clases (Any Phase like Air ---> Phase --> Domain --->ParserMixin, LabelMixin, ModelsMixin2, Base2).
+Las funciones add_model y add_model_collection se deben a la clase ModelsMixin2. Ruta de acceso:
+OpenPNM-3.2.0_mod/openpnm/core/_models.py
+
+El argumento add_model permite no solo agregar un modelo, sino también llamarlo nuevamente al usar regenerate_models o al anãdir el modelo.
+Siendo así, data que solo quiero llamar una vez no es necesario de incluir en el add_model. Ejemplo:
+
+**kwargs es para pasar toda la informacion adicional al modelo
+Por ejemplo, en el modelo de abajo, la info de surface_tension, contact_angle y diameter son pasados al modelo "f"
+
+f = op.models.physics.capillary_pressure.washburn
+air.add_model(propname='throat.entry_pressure',
+              model=f,
+              surface_tension='throat.surface_tension',
+              contact_angle='throat.contact_angle',
+              diameter='throat.diameter',)
+
+            ============ =====================================================
+            regen_mode   description
+            ============ =====================================================
+            normal       (default) The model is run immediately upon being
+                         added, and is also run each time ``regenerate_models``
+                         is called.
+            deferred     The model is NOT run when added, but is run each time
+                         ``regenerate_models`` is called. This is useful for
+                         models that depend on other data that may not exist
+                         yet.
+            constant     The model is run immediately upon being added, but is
+                         is not run when ``regenerate_models`` is called,
+                         effectively turning the property into a constant.
+            ============ =====================================================
+
+
+
+
+add_model_collection añade varios models a la vez. O sea hay n propnames con n models,
+
+ El objeto Invasion Percolation es del tipo Algorithm

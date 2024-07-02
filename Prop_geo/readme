@@ -1,0 +1,21 @@
+ 
+Functions created:
+
+"Gcorr_beta_throats"
+
+Call the functions "Gcorr_isos" and "half_ang_isos" to obtain the geometric properties of the throats
+
+"Gcorr_isos"
+
+Corrects the form factor G of an array of figures, assuming that initially G was calculated considering voxealized isosceles triangles.
+
+
+"half_ang_isos"
+
+Calculate the half corner angles of a group of figures assuming isosceles triangles
+#Assumes that 1w-16 <= G <= 0.04811252243
+
+"geo_props_eq_pores"
+
+Calculate the geometric properties of the pores assuming tubes with an equilateral triangle section.
+
