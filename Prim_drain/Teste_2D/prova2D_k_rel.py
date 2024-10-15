@@ -25,65 +25,41 @@ import porespy as ps
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
+from tqdm import tqdm
+#importing functions for other file
+import sys
+sys.path.insert(1, '/home/cesar/OpenPNM_files/mestrado/_funcs')
 import _algorithm_class as _alg
 import _conductance_funcs as _cf
+import _invasion_funcs as _if
+#end
 np.random.seed(13)
 
-n_side = 10 #pores per side
-pn = op.network.Demo(shape=[n_side , n_side , 1], spacing=1e-4)
-#pn = op.network.Demo(shape=[15, 15, 1], spacing=1e-4)
+#Flowrate function
+def Rate_calc(network, ph, inlet, outlet, conductance):
+    St_p = op.algorithms.StokesFlow(network=network, phase=ph)
+    St_p.settings._update({'conductance' : conductance})
+    St_p.set_value_BC(pores=inlet, values=1)
+    St_p.set_value_BC(pores=outlet, values=0)
+    St_p.run()
+    val = np.abs(St_p.rate(pores=inlet, mode='group'))
+    return val
+#Reading pnm arquive/ network
+ws = op.Workspace()
+testName ='Rede_2D_10x10.pnm'
+proj = ws.load_project(filename=testName)
+
+pn = proj.network
+
+#SOLO PARA RED CREADA, ACTUALIZANDO NUMERO DE GARGANTAS
 Np = pn.Np
-Nt = pn.Np
-
-#Set boundary pores
-inlet_pores = pn.pores('front')
-outlet_pores = pn.pores('back')
-
-#Assuming diameter as cross-sectional diameter of a prism, assign beta and calculate G
-elements = ['pore', 'throat']
-for item in elements:
-    G = np.random.rand(len( pn[f'{item}.diameter'])) * 3 ** 0.5/36
-    pn[f'{item}.shape_factor'] = G
-    pn[f'{item}.half_corner_angle'] = op.teste.geometry.half_angle_isosceles(G)
-
-#Checking if throats have smaller diameter than connected pores
-D1, Dt, D2 = pn.get_conduit_data('diameter').T
-print( np.any( Dt > D1) or np.any( Dt > D2) ) #must be false
-
-#setting a path to be invaded first
-#path = np.arange((n_side - 1 ) * (n_side - 6) , (n_side - 1 ) * (n_side - 5)) #front-back
-path = np.array([27,28,29,30,31,32,33,34,35, #main branch
-                 40,41,42,43,44, #second branch
-                 124, #connection second branch
-                 122, #connectrion third branch
-                 131,141,133,143,37,38,55,56#third branch
-                 ])
-
-#modifying throat diameter (The cross-sectional area change if d  change. Howver. Pc does not depends on that
-pn['throat.diameter'] = pn['throat.diameter'] * 0.4 #reducing all diameters
-pn['throat.diameter'][path] = np.minimum(D1[path], D2[path]) * 0.999 #set path with bigger diameter, but less than connected pores
-pn['throat.diameter'][122] = np.minimum(D1[122], D2[122]) * 0.5 #Connection of third branch with a lower diameter than other throats from path
-pn['throat.diameter'][124] = pn['throat.diameter'][27] * 0.99
-
-#checking that the bigger throats are from path
-a = np.argsort(pn['throat.diameter'])
-print(a[-len(path):])
-print(path)
-
-#Modifying diameter in throats between inlet pores, because I dont know how to remove them
-#pn['throat.diameter'][np.arange(90, 180, 10)] = 1e-10
-t_removed = np.concatenate((np.arange(90, 180, 10) ,  np.arange(99, 189, 10) ))
-op.topotools.trim(pn, throats = t_removed)
-
-#Updating path indexes because of removing throats (we assume the bigger diameters are found on path)
-a = np.argsort(pn['throat.diameter'])
-path = a[-len(path):]
+Nt = pn.Nt
 
 #Properties extracted from Valvatne - Blunt (2004) Table 1
 tension = 30e-3 #N/m
 water_visc = 1.05e-3 #Pa/s
 oil_visc = 1.39e-3 #Pa/s
-theta = np.pi / 12 #Respecto al agua, en sexagecimal
+theta_r = np.pi / 180 * 0 #Respecto al agua, en sexagecimal
 
 #Add phase properties
 #OIL
@@ -99,73 +75,194 @@ water['pore.surface_tension'] = tension
 water['throat.surface_tension'] = tension
 water['pore.viscosity'] = water_visc
 water['throat.viscosity'] = water_visc
-water['pore.contact_angle'] = theta
-water['throat.contact_angle'] = theta
-
+water['pore.contact_angle'] = theta_r
+water['throat.contact_angle'] = theta_r
 
 #Simulating primary Drainage
-pd = _alg.Primary_Drainage(network=pn, phase=water)
-pd.set_inlet_BC(pores=inlet_pores)
-pd.set_outlet_BC(pores=outlet_pores)
-pd.run(throat_diameter = 'throat.diameter')
-print(pd)
+pdr = _alg.Primary_Drainage(network=pn, phase=water)
+pdr.set_inlet_BC(pores=pn['pore.inlet'])
+pdr.set_outlet_BC(pores=pn['pore.outlet'])
+pdr.run(throat_diameter = 'throat.diameter')
 
-b = np.argsort(pd['throat.entry_pressure'])
-print(b[0:len(path)])
-print(path)
-print(np.sort(path))
+#Post processing
+pmax_drn = 18000
+#p_vals =  np.array([0, pmax_drn])
+p_vals = np.unique(pdr['throat.invasion_pressure'][(pdr['throat.invasion_pressure'] < pmax_drn) & pn['throat.internal'] ] ) + 0.2
+p_vals = np.append(p_vals, pmax_drn)
 
+#Obtaining phase distribution and clusters for each stage of invasion according to p_vals
+results_pdr = pdr.postprocessing2(mode = 'pressure', inv_vals = p_vals)
+#Ya revise que a pc = 18000 y theta = 0, todos los clujsters de agua son 0, y de oleo diferente de 0
 
-inv_pattern = pd['throat.invasion_sequence'] <5
-print(max(pd['throat.invasion_pressure'][inv_pattern]))
+elements = ['pore', 'throat']
+locations = ['center', 'corner']
+
+"""
+#COMPROBANDO QUE LOS RESULTADOS DEL POSTPROCESSING CONCUERDAN CON LO QUE DEBERIA SALIR
+#------------START--------------
+i = 2
+p_inv = results_pdr[f'status_{i}']['invasion_pressure']
+print(p_inv)
+print(results_pdr[f'status_{i}']['cluster_info']['index_list'])
+inv_pattern = pdr['throat.invasion_pressure'] <= p_inv
+inv_pattern2 = ~results_pdr[f'status_{i}']['invasion_info']['throat.center']
+inv_pattern3 = results_pdr[f'status_{i}']['cluster_info']['pore.center'] == 1
 ax = op.visualization.plot_coordinates(network=pn, pores=pn.pores('front'), c='r', s=50)
 ax = op.visualization.plot_coordinates(network=pn, pores=pn.pores('front', mode='not'), c='grey', ax=ax)
+ax = op.visualization.plot_coordinates(network=pn, pores = inv_pattern3, c='g', s=100, ax=ax)
 op.visualization.plot_connections(network=pn, throats=inv_pattern, ax=ax, c = 'blue', linewidth = 5)
-op.visualization.plot_connections(network=pn, throats=path, ax=ax, c = 'yellow', linewidth = 2)
+op.visualization.plot_connections(network=pn, throats=inv_pattern2, ax=ax, c = 'yellow', linewidth = 2)
+
 plt.show()
+#------------END--------------
 
+raise Exception('Hola')
+"""
 
-bool_path = np.zeros_like(inv_pattern, dtype = bool)
-bool_path[path] = True
+#Volume from pores
+#Assuming all volume is on the pores
+V_sph = sum(pn['pore.volume'][pn['pore.internal']])
 
-import pandas as pad
+#Calculation conduit length
+L = _cf.conduit_length_tubes(pn,
+                             pore_length = "pore.diameter",
+                             throat_spacing = "throat.spacing",
+                             L_min = 1e-5,
+                             check_boundary = True)
 
-for item in elements:
-    df = pad.DataFrame(
-        {
-            "d": pn[f'{item}.diameter'],
-            "beta_0": pn[f'{item}.half_corner_angle'][:,0],
-            "beta_1": pn[f'{item}.half_corner_angle'][:,1],
-            "beta_2": pn[f'{item}.half_corner_angle'][:,2],
-            "G": pn[f'{item}.shape_factor'],
-        }
-    )
-    print(item)
-    if item == 'throat':
-        df.insert(5, "pce", pd[f'{item}.entry_pressure'])
-        df.insert(6, "path", bool_path)
-        df.insert(7,"P1", pn[f'{item}.conns'][:,0])
-        df.insert(8,"P2", pn[f'{item}.conns'][:,1])
-        #df.insert(9,"Area", pn[f'{item}.cross_sectional_area'])
-    df.to_csv(f'{item}.csv', index=True)
+sat = []
 
 """
-r = pn['throat.diameter'] / 2
-G = pn["throat.shape_factor"]
-beta = pn["throat.half_corner_angle"]
-S1 = np.sum((np.cos(theta) * np.cos(theta + beta) / np.sin(beta) + theta + beta - np.pi/2), axis = 1)
-S2 = np.sum((np.cos(theta + beta) / np.sin(beta)), axis = 1)
-S3 = 2*np.sum((np.pi / 2 - theta - beta), axis = 1)
-D = S1 - 2 * S2 * np.cos(theta) + S3
-root = (1 + 4 * G * D / np.cos(theta)**2)
-value = tension * (1 + root**0.5) / r
-i=1
-print(pd['throat.entry_pressure'][i])
-print(pn['throat.half_corner_angle'][i,:])
-print(S1[i])
-print(S2[i])
-print(S3[i])
-print(D[i])
-print(root[i])
-print(value[i])
+#Modifying boundary elements
+#invade inlet elements (pore, throat) of a boundary conduit with the center phase of the internal pore
+for i in tqdm(range(len(p_vals)), desc = 'Adapting phase on boundary conduits'):
+    status_str = 'status_' + str(i+1)
+    for t in range(Nt):
+        if pn['throat.boundary'][t]:
+            conns = pn['throat.conns'][t]
+            for p in conns:
+                if pn['pore.boundary'][p]:
+                    p_b = p
+                else:
+                    p_int = p
+            status = results_pdr[status_str]['invasion_info']['pore.center'][p_int]
+            index = results_pdr[status_str]['cluster_info']['pore.center'][p_int]
+            #Modifying boundary elements, center phase (I ignore corners, assuming thats OK. Not sure)
+            results_pdr[status_str]['invasion_info']['pore.center'][p_b] = status
+            results_pdr[status_str]['invasion_info']['throat.center'][t] = status
+            results_pdr[status_str]['cluster_info']['pore.center'][p_b] = index
+            results_pdr[status_str]['cluster_info']['throat.center'][t] = index
 """
+
+#Calculating flow rate for each phase: wp and nwp
+for wp in [True,False]:
+    rel_perm = []
+    if wp:
+        phase = water
+    else:
+        phase = oil
+
+    #Calculating conductance on each element
+    for item in elements:
+        status_center = np.ones_like(pn[f'{item}.shape_factor'], dtype = bool)
+        status_corner = np.ones_like(pn[f'{item}.half_corner_angle'], dtype = bool)
+        theta_corner = np.tile(water[f'{item}.contact_angle'],(3,1)).T #Funciona con un solo valor de theta
+        bi_corner = np.zeros_like(pn[f'{item}.half_corner_angle'])
+        viscosity = phase[f'{item}.viscosity'][0]
+        g, _, _ = _cf.conductance(pn, status_center, status_corner, theta_corner, bi_corner, viscosity, item = item, correction = True)
+        if item == 'pore':
+            gp = g
+        else:
+            gt = g
+
+    #Calculating conduit conductance
+    sph_g_L = _cf.conduit_conductance_2phases(network = pn,
+                                            pore_g_ce = gp,
+                                            throat_g_ce = gt,
+                                            conduit_length = L,
+                                            check_boundary = True)
+    label_conductance = 'throat.conductance'
+    phase[label_conductance] = sph_g_L
+
+    #Calculating single phase flow
+    sph_flow = Rate_calc(pn, phase, pn['pore.inlet'] , pn['pore.outlet'], label_conductance)
+
+    #MULTIPHASE
+    for i in tqdm(range(len(p_vals)), desc = 'Working with ' + phase.name):
+        print('----')
+        print(i)
+        print(phase.name)
+        print(p_vals[i])
+        status_str = 'status_' + str(i+1)
+
+        #Extracting data
+        cluster_ce = results_pdr[status_str]['cluster_info']['pore.center']
+        cluster_co = results_pdr[status_str]['cluster_info']['pore.corner']
+        phase_ce = results_pdr[status_str]['invasion_info']['pore.center'] == wp #True if wp is present
+        phase_co = results_pdr[status_str]['invasion_info']['pore.corner'] == wp
+        q_mph = []
+
+        #Calculating saturation
+        interface = (np.tile(phase_ce, (3,1)).T != phase_co)
+        theta_corner = np.tile(water['pore.contact_angle'],(3,1)).T #Funciona con un solo valor de theta
+        beta = pn['pore.half_corner_angle']
+        R = water['pore.surface_tension'][0]/ p_vals[i]
+        bi_corner = _if.interfacial_corner_distance(R, theta_corner, beta, int_cond = interface)
+        viscosity = phase['pore.viscosity'][0]
+        _, _, pore_ratio = _cf.conductance(pn, phase_ce, phase_co, theta_corner, bi_corner, viscosity, item = 'pore')
+        V_mph = np.sum((pn['pore.volume'] * pore_ratio)[pn['pore.internal']])
+        if wp:
+            sat.append(V_mph / V_sph)
+
+        #Determining continuous clusters for the phase
+        continuity_list = _if.identify_continuous_cluster(cluster_ce , cluster_co, pn['pore.inlet'], pn['pore.outlet'])
+        cluster_list_ce = np.unique(cluster_ce[phase_ce])
+        cluster_list_co = np.unique(cluster_co[phase_co])
+        cluster_list = np.union1d(cluster_list_ce, cluster_list_co)
+        phase_clusters = np.intersect1d(cluster_list, continuity_list)
+
+        #For each cluster of the same phase
+        for n in phase_clusters:
+            #Calculating conductance on each element
+            for item in elements:
+                BC = pn[f'{item}.boundary']
+                status_center = (results_pdr[status_str]['cluster_info'][f'{item}.center'] == n) | BC
+                status_corner = (results_pdr[status_str]['cluster_info'][f'{item}.corner'] == n) | np.tile(BC, (3,1)).T
+                interface = (np.tile(status_center, (3,1)).T != status_corner)
+                theta_corner = np.tile(water[f'{item}.contact_angle'],(3,1)).T #Funciona con un solo valor de theta
+                beta = pn[f'{item}.half_corner_angle']
+                R = water[f'{item}.surface_tension'][0]/ p_vals[i]
+                bi_corner = _if.interfacial_corner_distance(R, theta_corner, beta, int_cond = interface)
+                viscosity = phase[f'{item}.viscosity'][0]
+                if item == 'pore':
+                    gp_ce, gp_co, _ = _cf.conductance(pn, status_center, status_corner, theta_corner, bi_corner, viscosity, item = item, correction = True)
+                else:
+                    gt_ce, gt_co,_ = _cf.conductance(pn, status_center, status_corner, theta_corner, bi_corner, viscosity, item = item, correction = True)
+
+            #Calculating conduit conductance
+            g_L_mph = _cf.conduit_conductance_2phases(network = pn,
+                                        pore_g_ce = gp_ce,
+                                        throat_g_ce = gt_ce,
+                                        conduit_length = L,
+                                        pore_g_co = gp_co,
+                                        throat_g_co = gt_co,
+                                        corner = True,
+                                        check_boundary = True)
+            label_conductance = 'throat.conduit_conductance'
+            phase[label_conductance] = g_L_mph
+
+            #Calculating multiphase rate flow. Append in q_mph for each cluster
+            # Conductance cannot be zero. If that, matrix A become singular (empty rows) and can not be used
+            q_mph.append(Rate_calc(pn, phase, pn['pore.inlet'] , pn['pore.outlet'], label_conductance))
+
+        #Calculating k_r only if there are continuous clusters. Otherwise, k_r = 0
+        if len(phase_clusters) > 0:
+            mph_flow = np.sum(q_mph)
+            rel_perm.append(np.squeeze(mph_flow/sph_flow))
+        else:
+            rel_perm.append(0)
+
+    #Saving data
+    output = np.vstack((p_vals,  sat, rel_perm)).T
+    np.save('K_' + phase.name, output) #If wp, then 0. Otherwise 1
+    np.savetxt('K_'+ phase.name + '.txt', output, fmt=' %.5e '+' %.5e '+' %.5e ', header=' p// sat_w // kr')

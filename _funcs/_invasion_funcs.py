@@ -4,7 +4,8 @@ from openpnm.models import _doctxt
 from scipy.optimize import fsolve
 import openpnm as op
 from collections import namedtuple
-
+import scipy.sparse as sprs
+import scipy.sparse.csgraph as csgraph
 logger = logging.getLogger(__name__)
 
 
@@ -61,10 +62,161 @@ def MSP_prim_drainage(phase,
     value = sigma * np.cos(theta) * (1 + np.sqrt(1 + 4 * G * D / np.cos(theta)**2)) / r
     return value
 
+def update_cluster_index(cluster_dict, layer = False, list_string = 'index_list'):
+    r"""
+    Function used to update the indexes of the cluster dictionary
+    Assumes that center and corner positions exist
+    """
+    elements = ['pore', 'throat']
+    locations = ['center', 'corner']
+    if layer:
+        locations.append('layer')
+    index_list = []
+    for item in elements:
+        for loc in locations:
+            index_list = np.append(index_list,np.unique(cluster_dict[f'{item}.{loc}']))
+    cluster_dict[list_string] = np.unique(index_list)
+    return(cluster_dict)
+
+def merge_cluster(cluster_dict, cluster_indexes, layer = False, list_string = 'index_list'):
+    r"""
+    Function used to update the indexes of the cluster dictionary, merging two clusters
+    Assumes that center and corner positions exist
+    Choose the lower index
+    The first number in the cluster index is chosen to be the new index
+
+    Parameters:
+    -------------------
+    cluster_dict : Dictionary
+    cluster_indexes : The indexes of the merged clusters
+    """
+    new_index = cluster_indexes[0]
+    elements = ['pore', 'throat']
+    locations = ['center', 'corner']
+    if layer:
+        locations.append('layer')
+    for item in elements:
+        for loc in locations:
+            mask = np.isin(cluster_dict[f'{item}.{loc}'], cluster_indexes)
+            if np.any(mask):
+                cluster_dict[f'{item}.{loc}'][mask] = new_index
+    cluster_dict = update_cluster_index(cluster_dict, layer, list_string)
+    return cluster_dict
+
+def check_divide_cluster(network, cluster_dict, index, layer = False, list_string = 'index_list', index_mode = 'max', wp = False):
+    r"""
+    Function used to check if a cluster was divided
+    Assumes that center and corner positions exist
+    Choose the lower index
+
+    Parameters:
+    -------------------
+    cluster_dict : Dictionary
+    cluster_indexes : The indexes of the merged clusters
+    index_mode: just two modex: 'max' or 'min'. Set the new index
+
+    Return
+    cluster_dict: The dictionary, updated if the cluster was divided
+    """
+    index == int(index)
+    modes = ['max', 'min']
+    if index_mode not in modes:
+        raise Exception('Only two index modes: max, min.')
+    bool_divided = False
+    elements = ['pore', 'throat']
+    locations = ['center', 'corner']
+    if layer:
+        locations.append('layer')
+    check_cluster = {}
+    for item in elements:
+        for loc in locations:
+            check_cluster[f'{item}.{loc}'] = (cluster_dict[f'{item}.{loc}'] == index)
+    if layer and wp:
+        new_cluster_dict = cluster_advanced_WP_CLC(network, check_cluster)
+    else:
+        new_cluster_dict = cluster_advanced(network, check_cluster, corner = True, layer = layer)
+    if len(new_cluster_dict['index_list']) > 2:
+        #Divided cluster
+        bool_divided = True
+        #print(new_cluster_dict['index_list'])
+        if layer and wp:
+            child_clusters = new_cluster_dict['index_list'][new_cluster_dict['index_list'] < 1]
+        else:
+            child_clusters =  np.delete(new_cluster_dict['index_list'], 0)
+        #print(child_clusters)
+        for i in range(len(child_clusters) ):
+            if i > 0:
+                if index_mode == 'max':
+                    new_index = np.max(cluster_dict['index_list']) + 1
+                else:
+                    new_index = np.min(cluster_dict['index_list']) - 1
+                for item in elements:
+                    for loc in locations:
+                        keyname = item + '.' + loc
+                        mask = new_cluster_dict[keyname] == child_clusters[i]
+                        if np.any(mask):
+                            cluster_dict[keyname][mask] = new_index
+
+            cluster_dict = update_cluster_index(cluster_dict, layer, list_string)
+    return cluster_dict, bool_divided
+
+def obtain_nontrapped_clusters(wp_dict,
+                               cluster_dict,
+                               connect_wp_pores,
+                               connect_nwp_pores,
+                               layer = False,
+                               obtain_trapped = False):
+    r"""
+    Obtain list of non-trapped clusters
+    We consider IMBIBITION and triangular cross sections, so the wetting phase clusters are connected to the inlet.
+    and the non-wetting phase to the outlet.
+
+    Parameters:
+    ----------------
+    -phase_info: Dictionary with boolean arrays. Key detail lines below
+    -cluster_info: Dictionary with int arrays. Key detail lines below
+    -connect_wp_pores: Pores that allows the inlet or outlet of the wetting phase
+    -connect_nwp_pores: Pores that allows the inlet or outlet of the non-wetting phase
+    -inlet_pores: boolean array
+    -oulet_pores: boolean array
+
+    key:
+    'element.location'.
+    'element' can be 'pore' or 'throat'
+    'location' can be 'center' or 'corner'
+    Ex: 'pore.center'
+    """
+    #Non-trapped list
+    nontrapped_list = np.array([])
+
+    if layer:
+        corner_locations = ['corner', 'layer']
+    else:
+        corner_locations = ['corner']
+
+    for wp in [True, False]:
+        if wp:
+            BC = connect_wp_pores
+        else:
+            BC = connect_nwp_pores
+        index = np.unique(cluster_dict['pore.center'][ (wp_dict['pore.center'] == wp) & BC ])
+        if len(index) > 0:
+            nontrapped_list = np.append(nontrapped_list, index)
+        for loc in corner_locations:
+            index = np.unique(cluster_dict[f'pore.{loc}'][ (wp_dict[f'pore.{loc}'] == wp) & np.tile(BC, (3,1)).T ])
+            if len(index) > 0:
+               nontrapped_list = np.append(nontrapped_list, index)
+    nontrapped_list = np.unique(nontrapped_list)
+    if obtain_trapped:
+        trapped_list = np.setdiff1d(cluster_dict['index_list'], nontrapped_list )
+        return nontrapped_list, trapped_list
+    else:
+        return nontrapped_list
+
 def wp_in_corners(beta, theta):
     r"""
     Function that allows us to know if the corners of a triangle
-    can contain the wetting phase (True)
+    can contain the wetting phase (True) if the center phase is non-wetting
     beta: Array Nx3
     theta: Array Nx1
     """
@@ -73,23 +225,23 @@ def wp_in_corners(beta, theta):
 
     return condition
 
-def interfacial_corner_distance(R, theta, beta, int_cond = True):
+def interfacial_corner_distance(R, theta, beta, int_cond = True, outer_AM = False):
     r"""
     Calculate the distance between each corner of the triangular cross section and the location of the solid-phase 1 - phase 2 interface.
 
     Parameters:
     -R: Radius of curvature of the interface. Equivalent to tension/ capillary_pressure
-    -theta: Array with the contact angles at each corner.
+    -theta: float or np.array (same size as beta) with the contact angles at each corner.
     -beta: Half corner angle.
     -int_cond: interface condition for each corner. True or 3-columns boolean array.
      If False, there is no interface between center and corner, and bi = 0 for those corners
 
     """
-    if np.isinf(R):
-        #Impossible to calculate for geometry
-        bi = np.zeros_like(beta)
+    if outer_AM:
+        bi = -np.abs(R) * np.cos(theta - beta) / np.sin(beta)
     else:
         bi = R * np.cos(theta + beta) / np.sin(beta)
+    if isinstance(bi, np.ndarray):
         bi[bi < 0] = 0
         if type(int_cond) == bool:
             if int_cond:
@@ -101,7 +253,7 @@ def interfacial_corner_distance(R, theta, beta, int_cond = True):
     return bi
 
 
-def identify_continuous_cluster(cluster_pore_center , cluster_pore_corner, inlet_pores, outlet_pores):
+def identify_continuous_cluster(cluster_pore_center , cluster_pore_corner, inlet_pores, outlet_pores, cluster_pore_layer = None, layer = False):
     r"""
     This function returns a list of cluster indices that have a continuity.
     That is, the phase can enter and exit the porous medium.
@@ -112,15 +264,22 @@ def identify_continuous_cluster(cluster_pore_center , cluster_pore_corner, inlet
 
     Return a list of clusters
     """
-
-    cluster_list = np.unique(np.hstack((cluster_pore_center, cluster_pore_center)))
     continuous_list = []
-    for i  in cluster_list:
-        cond_inlet = (((cluster_pore_center == i) | np.any(cluster_pore_corner == i, axis = 1))[inlet_pores]).any()
-        cond_outlet = (((cluster_pore_center == i) | np.any(cluster_pore_corner == i, axis = 1))[outlet_pores]).any()
-        if cond_inlet and cond_outlet:
-            continuous_list.append(i)
-    return continuous_list
+    if layer:
+        cluster_list = np.unique(np.vstack(([cluster_pore_center], cluster_pore_corner.T, cluster_pore_layer.T)))
+        for i  in cluster_list:
+            cond_inlet = (((cluster_pore_center == i) | np.any(cluster_pore_corner == i, axis = 1) | np.any(cluster_pore_layer == i, axis = 1))[inlet_pores]).any()
+            cond_outlet = (((cluster_pore_center == i) | np.any(cluster_pore_corner == i, axis = 1) | np.any(cluster_pore_layer == i, axis = 1))[outlet_pores]).any()
+            if cond_inlet and cond_outlet:
+                continuous_list.append(i)
+    else:
+        cluster_list = np.unique(np.vstack((cluster_pore_corner.T, [cluster_pore_center])))
+        for i  in cluster_list:
+            cond_inlet = (((cluster_pore_center == i) | np.any(cluster_pore_corner == i, axis = 1))[inlet_pores]).any()
+            cond_outlet = (((cluster_pore_center == i) | np.any(cluster_pore_corner == i, axis = 1))[outlet_pores]).any()
+            if cond_inlet and cond_outlet:
+                continuous_list.append(i)
+    return np.array(continuous_list)
 
 def corner_area(beta, theta, bi):
     r"""
@@ -129,6 +288,282 @@ def corner_area(beta, theta, bi):
     S1 = (bi * np.sin(beta) / (np.cos(theta + beta)))
     S2 = (np.cos(theta) * np.cos(theta + beta) / np.sin(beta) + theta + beta - np.pi / 2  )
     return S1 ** 2 * S2
+
+def cluster_advanced(network, phase_locations, corner = False, layer = False):
+    r"""
+    Set index clusters to all phase locations according to its presence and location,
+    building a general connection list for pores and throat. NOT ADEQUATE IF WE CONSIDER THE WETTING PHASE AND LAYERS
+    Connections accepted:
+    corner-corner
+    layer-layer
+    layer-center
+    center-center
+    Determina los tipos de cluster revisando la coneccion de poros y gargamtas y la ubicación de las fases.
+    Hago una superlista de poros y gargantas
+    Parameters:
+    ------------------
+    pn: Network
+    phase_locations: main dictionary with the secondary dictionarys pore, throat; and the keywords center, corner, layer
+    corner: bool. If True, check locations 'center' and 'corner'
+    layer: bool. Used only if corner == True. If True, check also the location 'False'
+
+    Returns:
+    -------------------
+    cluster_info: dictionary with index information. Have the dictionaries 'pore', 'throat',
+    with the keywords 'center', 'corner', 'layer', 'index'
+    """
+    conns = network['throat.conns']
+    Np = network.Np
+    Nt = network.Nt
+    #Matriz of (Np + Nt) x (Np + Nt). gargantas de 0 a Nt-1. poros de Nt a Np-1
+    connections = np.zeros((Np+Nt, Np+Nt), dtype = bool)
+    if corner:
+        if layer:
+            #Completando las conecciones
+            for t in range(Nt):
+                #Revisando la presencia de la fase en gargantas
+                mask_t_center = phase_locations['throat.center'][t]
+                mask_t_corner = np.any(phase_locations['throat.corner'][t,:])
+                mask_t_layer = np.any(phase_locations['throat.layer'][t,:])
+                if mask_t_center or mask_t_corner or mask_t_layer:
+                    #Evaluando presencia de la fase en poros vecino:
+                    for cn in [0,1]:
+                        p = conns[t,cn]
+                        mask_p_center = phase_locations['pore.center'][p]
+                        mask_p_corner = np.any(phase_locations['pore.corner'][p,:])
+                        mask_p_layer = np.any(phase_locations['pore.layer'][p,:])
+                        #Estableciendo conexion (Tabla 3.4 disertacion)
+                        if ((mask_t_layer or mask_t_center) and (mask_p_layer or mask_p_center)) or (mask_t_corner and mask_p_corner):
+                            connections[t, Nt + p] = True
+        else:
+            #Completando las conecciones
+            for t in range(Nt):
+                #Revisando la presencia de la fase en gargantas
+                mask_t_center = phase_locations['throat.center'][t]
+                mask_t_corner = np.any(phase_locations['throat.corner'][t,:])
+                if mask_t_center or mask_t_corner:
+                    #Evaluando presencia de la fase en poros vecino:
+                    for cn in [0,1]:
+                        p = conns[t,cn]
+                        mask_p_center = phase_locations['pore.center'][p]
+                        mask_p_corner = np.any(phase_locations['pore.corner'][p,:])
+                        #Estableciendo conexion (Tabla 3.4 disertacion)
+                        if (mask_t_center and mask_p_center) or (mask_t_corner and mask_p_corner):
+                            connections[t, Nt + p] = True
+
+    #Aplicando el algoritmo scipy de cluster
+    connections = sprs.csr_matrix(connections)
+    clusters = csgraph.connected_components(csgraph=connections, directed=False, return_labels=True)[1] + 1
+    throat_clusters = clusters[0:Nt]
+    pore_clusters = clusters[Nt:(Nt+Np)]
+
+    #Adding information
+    cluster_info = {}
+    cluster_info['pore.center'] = pore_clusters * phase_locations['pore.center']
+    cluster_info['pore.corner'] = np.tile(pore_clusters,(3,1)).T * phase_locations['pore.corner']
+    cluster_info['throat.center'] = throat_clusters * phase_locations['throat.center']
+    cluster_info['throat.corner'] = np.tile(throat_clusters,(3,1)).T * phase_locations['throat.corner']
+    if layer:
+        cluster_info['pore.layer'] = np.tile(pore_clusters,(3,1)).T * phase_locations['pore.layer']
+        cluster_info['throat.layer'] = np.tile(throat_clusters,(3,1)).T * phase_locations['throat.layer']
+
+    #Creating index list per element
+    for item  in ['pore', 'throat']:
+        if layer:
+            indexinfo = np.concatenate( (cluster_info[item +'.corner'].flatten(), cluster_info[item +'.layer'].flatten(), cluster_info[item +'.center']))
+        else:
+            indexinfo = np.concatenate( (cluster_info[item +'.corner'].flatten(), cluster_info[item +'.center']))
+        cluster_info[item + '.index'] = np.unique(indexinfo)
+
+    #Creating general list
+    indexinfo = np.concatenate( (cluster_info['pore.index'], cluster_info['throat.index']) )
+    cluster_info['index_list'] = np.sort(np.unique(indexinfo))
+
+    #Using consecutive numbers as index
+    newlist = np.arange(len(  cluster_info['index_list'] ))
+
+    if layer:
+        locations = ['corner', 'center', 'layer']
+    else:
+        locations = ['corner', 'center']
+
+    for item in ['pore', 'throat']:
+        for i in range( len(newlist) ):
+            if np.isin(cluster_info['index_list'][i], cluster_info[item + '.index']):
+                mask = cluster_info[item + '.index'] == cluster_info['index_list'][i]
+                cluster_info[item + '.index'][ mask ] = newlist[i]
+                for loc in locations:
+                    mask = cluster_info[item + '.' + loc] == cluster_info['index_list'][i]
+                    cluster_info[item + '.' + loc][ mask ] = newlist[i]
+    cluster_info['index_list'] = newlist
+    return cluster_info
+
+def cluster_advanced_WP_CLC(network, phase_locations):
+    r"""
+    Set index clusters to all phase locations for the wetting phase (wp) according to its presence and location,
+    building a general connection list for pores and throat.
+    First create clusters considering the corner locations (if all elements has at least one corner with the wp, we have one large cluster with index 0)
+    Then , we set cluster index considering only the center and layer locations. For each cluster found, if at least one elements is saturated with the wp, this cluster has index 0.
+
+    If an element has the wetting phase, it has to be, at least, on the corner
+
+    Connections accepted:
+    corner-corner
+    layer-layer
+    layer-center
+    center-center
+    Determina los tipos de cluster revisando la coneccion de poros y gargamtas y la ubicación de las fases.
+    Hago una superlista de poros y gargantas
+    Parameters:
+    ------------------
+    pn: Network
+    phase_locations: main dictionary with the secondary dictionarys pore, throat; and the keywords center, corner, layer. True for all phase locations with the wp
+    index_start: First index used to set the clusters that are not part of the large cluster
+
+    Returns:
+    -------------------
+    cluster_info: dictionary with index information. Have the dictionaries 'pore', 'throat',
+    with the keywords 'center', 'corner', 'layer', 'index'
+    """
+    elements = ['pore', 'throat']
+    locations = ['center', 'layer', 'corner']
+    conns = network['throat.conns']
+    Np = network.Np
+    Nt = network.Nt
+    mask_wp_co_array = np.zeros(Np+Nt, dtype = bool)
+    mask_wp_la_array = np.zeros(Np+Nt, dtype = bool)
+    mask_wp_ce_array = np.zeros(Np+Nt, dtype = bool)
+    for t in range(Nt):
+        mask_wp_co_array[t] = np.any(phase_locations['throat.corner'][t,:])
+        mask_wp_la_array[t] = np.any(phase_locations['throat.layer'][t,:])
+        mask_wp_ce_array[t] = phase_locations['throat.center'][t]
+    for p in range(Np):
+        mask_wp_co_array[Nt + p] = np.any(phase_locations['pore.corner'][p,:])
+        mask_wp_la_array[Nt + p] = np.any(phase_locations['pore.layer'][p,:])
+        mask_wp_ce_array[Nt + p] = phase_locations['pore.center'][p]
+    mask_connected_wp = mask_wp_co_array & mask_wp_la_array #conexion ce-la-co
+    #Matriz of (Np + Nt) x (Np + Nt). gargantas de 0 a Nt-1. poros de Nt a Np-1
+    connections = np.zeros((Np+Nt, Np+Nt), dtype = bool)
+    #Averiguando conecciones de esquinas
+    for t in range(Nt):
+        #Revisando la presencia de la fase en gargantas
+        if mask_wp_co_array[t]:
+            #Evaluando presencia de la fase en poros vecino:
+            for cn in [0,1]:
+                p = conns[t,cn]
+                #Estableciendo conexion (Tabla 3.4 disertacion)
+                if mask_wp_co_array[Nt + p]:
+                    connections[t, Nt + p] = True
+    connections = sprs.csr_matrix(connections)
+    clusters = csgraph.connected_components(csgraph=connections, directed=False, return_labels=True)[1] * -1 #To have negative values
+    clusters[~mask_wp_co_array] = 1
+    corner_index = -1
+    for index in np.unique(clusters[clusters < 1]):
+        mask = clusters == index
+        clusters[mask] = corner_index
+        corner_index -= 1
+    center_index = np.min(clusters) - 1
+    #La fase de las esquinas forma un unico clusters
+    #Identificando clusters para fases centro y layer
+    connections = np.zeros((Np+Nt, Np+Nt), dtype = bool)
+    for t in range(Nt):
+        #Revisando la presencia de la fase en gargantas
+        if mask_wp_ce_array[t]:
+            #Evaluando presencia de la fase en poros vecino:
+            for cn in [0,1]:
+                p = conns[t,cn]
+                #Estableciendo conexion (Tabla 3.4 disertacion)
+                if mask_wp_ce_array[Nt + p]:
+                    connections[t, Nt + p] = True
+    connections = sprs.csr_matrix(connections)
+    clusters_ce = csgraph.connected_components(csgraph=connections, directed=False, return_labels=True)[1] * -1 - 1 + center_index
+    #Identifying elements filled completely with wp
+    clusters_ce[~mask_wp_ce_array] = 1
+    bool_all_connected = True
+    for index in np.unique(clusters_ce[clusters_ce < 1]):
+        mask = clusters_ce == index
+        if np.any(mask_connected_wp[mask]):
+            clusters_ce[mask] = clusters[mask]
+        else:
+            clusters_ce[mask] = center_index
+            center_index -= 1
+    if not bool_all_connected:
+        raise Exception('Center phase separada de otros elementos')
+    throat_clusters = clusters_ce[0:Nt]
+    pore_clusters = clusters_ce[Nt:(Nt+Np)]
+    #Adding information
+    cluster_info = {}
+    for item in elements:
+        if item =='pore':
+            N = Np
+            cluster_index_co = clusters[Nt:(Nt+Np)]
+            cluster_index_ce = clusters_ce[Nt:(Nt+Np)]
+        else:
+            N = Nt
+            cluster_index_co = clusters[0:Nt]
+            cluster_index_ce = clusters_ce[0:Nt]
+        cluster_info[f'{item}.center'] = np.ones(N, dtype = int)
+        cluster_info[f'{item}.center'][phase_locations[f'{item}.center']] = cluster_index_ce[phase_locations[f'{item}.center']]
+        cluster_info[f'{item}.layer'] = np.ones((N,3), dtype = int)
+        cluster_info[f'{item}.layer'][phase_locations[f'{item}.layer']] = np.tile(cluster_index_ce,(3,1)).T [phase_locations[f'{item}.layer']]
+        cluster_info[f'{item}.corner'] = np.ones((N,3), dtype = int)
+        cluster_info[f'{item}.corner'][phase_locations[f'{item}.corner']] = np.tile(cluster_index_co,(3,1)).T [phase_locations[f'{item}.corner']]
+    cluster_info['index_list'] = np.unique(np.concatenate((clusters,clusters_ce)))
+
+    return cluster_info
+
+
+
+    #Aplicando el algoritmo scipy de cluster
+    """
+    connections = sprs.csr_matrix(connections)
+    clusters = csgraph.connected_components(csgraph=connections, directed=False, return_labels=True)[1] + 1
+    throat_clusters = clusters[0:Nt]
+    pore_clusters = clusters[Nt:(Nt+Np)]
+
+    #Adding information
+
+    cluster_info = {}
+    cluster_info['pore.center'] = pore_clusters * phase_locations['pore.center']
+    cluster_info['pore.corner'] = np.tile(pore_clusters,(3,1)).T * phase_locations['pore.corner']
+    cluster_info['throat.center'] = throat_clusters * phase_locations['throat.center']
+    cluster_info['throat.corner'] = np.tile(throat_clusters,(3,1)).T * phase_locations['throat.corner']
+    if layer:
+        cluster_info['pore.layer'] = np.tile(pore_clusters,(3,1)).T * phase_locations['pore.layer']
+        cluster_info['throat.layer'] = np.tile(throat_clusters,(3,1)).T * phase_locations['throat.layer']
+
+
+    #Creating index list per element
+    for item  in ['pore', 'throat']:
+        if layer:
+            indexinfo = np.concatenate( (cluster_info[item +'.corner'].flatten(), cluster_info[item +'.layer'].flatten(), cluster_info[item +'.center']))
+        else:
+            indexinfo = np.concatenate( (cluster_info[item +'.corner'].flatten(), cluster_info[item +'.center']))
+        cluster_info[item + '.index'] = np.unique(indexinfo)
+
+    #Creating general list
+    indexinfo = np.concatenate( (cluster_info['pore.index'], cluster_info['throat.index']) )
+    cluster_info['index_list'] = np.sort(np.unique(indexinfo))
+
+    #Using consecutive numbers as index
+    newlist = np.arange(len(  cluster_info['index_list'] ))
+
+    if layer:
+        locations = ['corner', 'center', 'layer']
+    else:
+        locations = ['corner', 'center']
+
+    for item in ['pore', 'throat']:
+        for i in range( len(newlist) ):
+            if np.isin(cluster_info['index_list'][i], cluster_info[item + '.index']):
+                mask = cluster_info[item + '.index'] == cluster_info['index_list'][i]
+                cluster_info[item + '.index'][ mask ] = newlist[i]
+                for loc in locations:
+                    mask = cluster_info[item + '.' + loc] == cluster_info['index_list'][i]
+                    cluster_info[item + '.' + loc][ mask ] = newlist[i]
+    cluster_info['index_list'] = newlist
+    """
+
 
 def make_contiguous_clusters(network, invaded_throats, inlet_pores = None):
     r"""
@@ -453,7 +888,7 @@ def pressure_snapoff1(beta,
                      theta_a,
                      d,
                      pc_max,
-                     max_it = 10,
+                     max_it = 20,
                      tol =  0.1):
     r"""
     Calculate entry capillary pressure of ONE element (pore or throat) assuming snap off and a triangular cross section.
@@ -500,19 +935,94 @@ def pressure_snapoff1(beta,
         while i < max_it:
             theta_h3 = min(np.arccos(p2 / pc_max * np.cos(theta_r + beta_3)) - beta_3, theta_a)
             theta_h2 = min(np.arccos(p2 / pc_max * np.cos(theta_r + beta_2)) - beta_2, theta_a)
-            p2 = sigma / r * (np.cos(theta_a) / np.tan(beta_1) - np.sin(theta_a) + np.cos(theta_h3) / np.tan(beta_3) - np.sin(theta_h3)) / (1 / np.tan(beta_1) + 1 / np.tan(beta_2))
+            p2 = sigma / r * (np.cos(theta_a) / np.tan(beta_1) - np.sin(theta_a) + np.cos(theta_h3) / np.tan(beta_3) - np.sin(theta_h3)) / (1 / np.tan(beta_1) + 1 / np.tan(beta_3))
             err = abs(p2 - p2_old)
             p2_old = p2
             i += 1
             if  np.all(err < tol):
                 break
             elif i == max_it:
+                print(err)
+                print(tol)
                 raise Exception('Maximum number of iterations (%i) reached. Pressure can not be calculated' % max_it)
 
         #two or more interfaces ar moving
-        p3 = sigma / r * (np.cos(theta_a) - 2 * np.sin(theta_a) / (1 / np.tan(beta_1) + np.tan(beta_2)))
+        p3 = sigma / r * (np.cos(theta_a) - 2 * np.sin(theta_a) / (1 / np.tan(beta_1) + 1 / np.tan(beta_2)))
 
         #Choosing  the best option
         p = max(p2, p3)
     return p
 
+def nwp_in_layers(beta, theta_r, theta_a):
+    r"""
+    Function that allows us to know if the corners of a triangle
+    can contain a sandwiched layer with the non wetting phase (True)
+    The center and corner phases are occupied by the wp
+    beta: Array Nx3
+    theta_r, theta_a: Array Nx3 or number
+    """
+    condition = (beta < (np.pi / 2 - theta_r)) & (beta < (theta_a - np.pi / 2))
+    return condition
+
+def pressure_LC(beta,
+                bi,
+                sigma,
+                theta_a,
+                mask = None):
+    r"""
+    Method to calculate the pressure for a layer to collapse
+    If bi == 0, its impossible to have a layer
+
+    Parameters:
+    --------------
+    beta: half corner angles
+    bi: Inner interface distance
+    sigma: interfacial tension
+    theta_a: advancing contact angle. Number of an array like beta
+    mask: corners where the layers exist
+
+    Return:
+    ------------------
+    p: presure for a layer to collapse
+    """
+    if mask is None:
+        mask = bi != 0
+    else:
+        mask = mask & (bi != 0)
+    if isinstance(theta_a, (int, float)):
+        theta_a = np.ones_like(beta) * theta_a
+    p = np.ones_like(beta) * -np.inf #If no layer, positive inf to be reported as breaked on imbibition´
+    p[mask] = sigma / bi[mask] * np.cos( np.arccos( (2 * np.sin(beta) + np.cos(theta_a) )[mask] ) + beta[mask] ) / np.sin(beta[mask])
+    return p
+
+
+def verify_LF(beta,
+              beta_max,
+              bi_beta_max,
+              R_inscribed,
+              sigma,
+              theta_a,
+              pressure):
+    r"""
+    Verifying, geometrically, if the layer formation can be formed after a MTM displacement.
+    Calculated for only one corner. Assuming triangular cross section
+    True if is possible
+
+    Parameters:
+    --------------
+    beta: the half corner angle of the corner that we are verified
+    beta_max: maximum half corner angle
+    bi_beta_max: interface distance related to the corner with the maximum half corner angle
+    R_inscribed: cross sectional inscribed radius
+    sigma: interfacial tension
+    theta_a: advancing contact angle.
+    pressure: actual capillary pressure
+
+    Return:
+    ------------------
+    boolean result. True if a layer can be created
+    """
+    R = R_inscribed
+    a = R *(1/np.tan(beta) + 1/np.tan(beta_max))
+    bo = sigma / pressure * np.cos(theta_a - beta) / np.sin(beta)
+    return (bo + bi_beta_max) < a

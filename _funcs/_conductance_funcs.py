@@ -18,6 +18,42 @@ __all__ = [
 #lo siguiente: @_doctxt
 #Esto lo unico que hace es substituir %(nombre)s por el texto del archivo _doctxt
 
+
+def calc_area_twophase(
+    network,
+    status_center,
+    status_corner,
+    theta_corner,
+    bi_corner,
+    cross_sectional_area = 'cross_sectional_area',
+    item = None,
+    layer = False):
+    r"""
+    Just calculate total corner and center area
+    """
+    #Checking data
+    if item not in ['pore', 'throat']:
+        raise Exception('item must be a str: pore or throat')
+    #Picking data
+    beta = network[f'{item}.half_corner_angle']
+    area = network[f'{item}.' + cross_sectional_area]
+
+    #Corner area independent from phase location
+    A_corner = _if.corner_area(beta, theta_corner, bi_corner)
+
+    #If corner and center share the same phase, A_corner = 0. A_center include those corners
+    A_center = status_center * (area - np.sum(A_corner * ~status_corner, axis = 1) )
+    A_corner = (A_corner * status_corner) * ~ np.tile(status_center,(3,1)).T
+
+    if np.any(A_center < 0) or np.any(A_corner < 0):
+        print('problem')
+        print(item)
+        print(np.where(A_center < 0)[0])
+        print(A_center[41])
+        print(A_corner[41,:])
+        raise Exception ('Some areas are negative. Posible geometrial incongruence. Check bi, or theta')
+    return A_center, A_corner
+
 def conductance(
     network,
     status_center,
@@ -93,6 +129,8 @@ def conductance(
     A_corner = (A_corner * status_corner) * ~ np.tile(status_center,(3,1)).T
 
     if np.any(A_center < 0) or np.any(A_corner < 0):
+        print(item)
+        print(np.where(A_center < 0)[0])
         raise Exception ('Some areas are negative. Posible geometrial incongruence. Check bi, or theta')
 
     #If sum (A_corner) > A_center, there is only one phase #CHECK THAT ON IMBIBITION
@@ -129,6 +167,120 @@ def conductance(
         factor = np.polyval(pol, beta_dif)
         cond_center = cond_center * factor
     return cond_center, cond_corner, ratio_phase
+
+def conductance_center(
+    area_center,
+    shape_factor,
+    viscosity,
+    beta,
+    null_value = 1e-30,
+    correction = False):
+    r"""
+    Center conductance, assuming triangular cross sections
+    Reference: Valvatne & Blunt (2004)
+
+    Parameters:
+    -----------
+    -area_center:
+    -viscosity :
+    -null_value:
+    -correction: Apply correction for triangular ducts, from  White (2002)
+
+    Returns:
+    -------------
+    -conductance
+    """
+    A = area_center
+    G = shape_factor
+    #Center Conductance
+    g_center = np.maximum(3/5 * A ** 2 * G/ viscosity, null_value)
+
+    if correction:
+        beta_dif = np.pi/2 - 2 * beta[:,1]
+        pol = np.array([-0.17997611,  0.57966346, -0.46275726,  1.10633925])
+        factor = np.polyval(pol, beta_dif)
+        g_center = g_center * factor
+    return g_center
+
+def conductance_corner(
+    area_corner,
+    beta,
+    bi,
+    theta,
+    viscosity,
+    null_value = 1e-30):
+    r"""
+    Center conductance, assuming triangular cross sections
+    Reference: Valvatne & Blunt (2004)
+
+    Parameters:
+    -----------
+    -area_center:
+    -viscosity :
+    -null_value:
+    -correction: Apply correction for triangular ducts, from  White (2002)
+
+    Returns:
+    -------------
+    -conductance
+    """
+    A = area_corner
+
+    #Corner conductance
+    P = 2 * bi  * (1 - np.sin(beta) / np.cos(beta + theta) * (theta + beta - np.pi / 2))
+    if isinstance(beta, np.ndarray):
+        mask = A == 0
+        P[mask] = null_value
+    G = A / P ** 2
+    if isinstance(beta, np.ndarray):
+        G[mask] = null_value
+    G_mod = np.sin(beta) * np.cos(beta) / (2 + 2 * np.sin(beta))**2
+    C = 0.364 + 0.28 * G_mod / G
+    g_corner = (C * A ** 2 * G) / viscosity
+    if isinstance(beta, np.ndarray):
+        g_corner[mask] = null_value
+        g_corner = np.sum(g_corner, axis = 1)
+    return g_corner
+
+def conductance_layer(
+    theta_in,
+    theta_o,
+    beta,
+    b_in,
+    b_o,
+    viscosity ):
+    r"""
+    Layer conductance, assuming triangular cross sections.
+    properties of the inner (in) and outer (o) AM are required
+    Reference: Valvatne & Blunt (2004)
+
+    Parameters:
+    -----------
+    -theta: inner and outer
+    -beta
+    -b: inner and outer
+    -correction: Apply correction for triangular ducts, from  White (2002)
+
+    Returns:
+    -------------
+    -conductance
+    """
+    #Dimensionless area (A), distance of the inner AM (b_in) and interface length (L)
+    A_o_dl = ( np.sin(beta) / np.cos(theta_o - beta) )**2 * (np.cos(theta_o) * np.cos(theta_o - beta) / np.sin(beta) - theta_o + beta + np.pi/2 )
+    b_in_dl = b_in / b_o
+    A_in_dl = (b_in_dl * np.sin(beta) / np.cos(theta_in - beta) )**2 * (np.cos(theta_in) * np.cos(theta_in - beta) / np.sin(beta) - theta_in + beta + np.pi/2 )
+    A_l_dl = A_o_dl - A_in_dl
+    L_o_dl = 2 * np.sin(beta) / np.cos(theta_o - beta) * (np.pi/2 - theta_o + beta)
+    L_in_dl = 2 * b_in_dl * np.sin(beta) / np.cos(theta_in - beta) * (np.pi/2 - theta_in + beta)
+
+    #Layer shape factor
+    G_l = A_l_dl / ( L_o_dl + L_in_dl + 2*(1 - b_in_dl) ) ** 2
+
+    #Dimensionless layer conductance
+    g_l_dl = np.e**(-0.02401 * np.log(A_l_dl**3 * G_l)**2 + 0.2840 * np.log(A_l_dl**3 * G_l) - 2.953)
+    g_l = b_o ** 4 * g_l_dl / viscosity
+    return g_l
+
 
 def conductance_triangle_OnePhase(
     phase,
@@ -540,14 +692,21 @@ def conduit_conductance_2phases(
 
 
     pore_g = pore_g_ce + pore_g_co  + pore_g_la
+    #print(f'pore_g 42: {pore_g[42]}')
     throat_g = throat_g_ce + throat_g_co  + throat_g_la
+    #print(f'throat_g 37: {throat_g[37]}')
     if check_boundary:
             pore_g[network['pore.' + boundary]] = np.inf
             throat_g[network['throat.' + boundary]] = np.inf
     P1_g = pore_g[P1]
     P2_g = pore_g[P2]
     P12_g = np.vstack((P1_g , throat_g, P2_g)).T
+    #print([P1[37], 37, P2[37]])
+    #print(f'conduit_g 37: {P12_g[37,:]}')
+    #print(f'L_g 37: {conduit_length[37,:] / P12_g[37,:]}')
+    #print(f'sum L_g 37: {np.sum(conduit_length[37,:] / P12_g[37,:])}')
     g_L = np.sum(conduit_length / P12_g, axis = 1 )**(-1)
+    #print(g_L[37])
     return g_L
 
 

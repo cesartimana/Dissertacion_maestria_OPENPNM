@@ -12,14 +12,14 @@ import matplotlib.pyplot as plt
 
 #importing functions for other file
 import sys
-sys.path.insert(1, '/home/cesar/OpenPNM_files/_funcs')
+sys.path.insert(1, '/home/cesar/OpenPNM_files/mestrado/_funcs')
 import _algorithm_class as _alg
 import _conductance_funcs as _cf
 import _invasion_funcs as _if
 #end
 
 import matplotlib
-matplotlib.rcParams.update({'font.size': 18})
+matplotlib.rcParams.update({'font.size': 22})
 
 
 np.random.seed(13)
@@ -144,7 +144,7 @@ G_int = np.sort(G[~mask_tBC])
 dist_cum = np.arange(len(G_int)) / (len(G_int) + 1)
 one_array = np.ones_like(G_int)
 
-fig1, ax1 = plt.subplots(1, figsize = (7,7))
+fig1, ax1 = plt.subplots(1, figsize = (8,6))
 ax1.plot(G_int, dist_cum ,'k', linewidth = 3, label = 'Berea data')
 ax1.plot(one_array * 3**0.5 / 36, dist_cum , 'r--', linewidth = 2, label = r'$G = \sqrt{3}/36$')
 ax1.plot(G_int, one_array * 0.416 , 'b--', linewidth = 2, label = 'prob. = 41.6%')
@@ -152,7 +152,8 @@ ax1.set_xlabel('G')
 ax1.set_ylabel('cumulative probability')
 ax1.set_xlim([0,0.05])
 ax1.set_ylim([0,1])
-ax1.legend()
+ax1.legend(fontsize = "18")
+plt.tight_layout()
 
 #Transforming to numpy arrays
 dist_G_label = np.array(labels) / 10
@@ -163,25 +164,28 @@ Gmin = np.array(Gmin)
 one_array = np.ones_like(Kx)
 y_array = np.arange(len(Kx)) * 1200
 
-fig2, ax2 = plt.subplots(1, figsize = (8,7))
-ax2.plot(dist_G_label, Kx ,'ko', markersize = 10, label = r'$K_x$')
-ax2.plot(dist_G_label, Ky ,'ro', markersize = 10, label = r'$K_y$')
-ax2.plot(dist_G_label, Kz ,'bo', markersize = 10, label = r'$K_z$')
-ax2.plot(one_array * 41.6, y_array ,'k--', linewidth = 1.5, label = 'prob. = 41.6%')
-ax2.set_xlabel(r'probability($G = G^*$)')
-ax2.set_ylabel('K')
+fig2, ax2 = plt.subplots(1, figsize = (8,6))
+ax2.plot(dist_G_label, Kx ,'ko', markersize = 10, label = r'$k_x$')
+ax2.plot(dist_G_label, Ky ,'ro', markersize = 10, label = r'$k_y$')
+ax2.plot(dist_G_label, Kz ,'bo', markersize = 10, label = r'$k_z$')
+ax2.plot(one_array * 41.6, y_array ,'k--', linewidth = 2, label = '$\mathbb{P}(G = G^*)$ = 41.6%')
+ax2.set_xlabel(r'$\mathbb{P}(G = G^*)$')
+ax2.set_ylabel(r'$k_{abs}$')
 ax2.set_xlim([0,45])
 ax2.set_ylim([0,1200])
-ax2.legend()
+ax2.legend(fontsize = "18")
+plt.tight_layout()
 
-fig3, ax3 = plt.subplots(1, figsize = (8,7))
-ax3.plot(Gmin, Kx ,'ko', markersize = 10, label = r'$K_x$')
-ax3.plot(Gmin, Ky ,'ro', markersize = 10, label = r'$K_y$')
-ax3.plot(Gmin, Kz ,'bo', markersize = 10, label = r'$K_z$')
-ax3.plot(one_array * 3 ** 0.5 / 36, y_array ,'k--', linewidth = 1.5, label = r'$G^* = \sqrt{3}/36$')
+fig3, ax3 = plt.subplots(1, figsize = (8,6))
+ax3.plot(Gmin, Kx ,'ko', markersize = 10, label = r'$k_x$')
+ax3.plot(Gmin, Ky ,'ro', markersize = 10, label = r'$k_y$')
+ax3.plot(Gmin, Kz ,'bo', markersize = 10, label = r'$k_z$')
+ax3.plot(one_array * 3 ** 0.5 / 36, y_array ,'k--', linewidth = 2, label = r'$G^* = \sqrt{3}/36$')
 ax3.set_xlabel(r'$G^*$')
-ax3.set_ylabel('K')
+ax3.set_ylabel(r'$k_{abs}$')
 ax3.set_xlim([0,0.05])
 ax3.set_ylim([0,1200])
-ax3.legend()
+ax3.legend(fontsize = "18")
+plt.tight_layout()
+
 plt.show()

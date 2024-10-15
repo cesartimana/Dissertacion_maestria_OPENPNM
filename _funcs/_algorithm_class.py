@@ -7,6 +7,7 @@ import math as m
 import warnings
 import _invasion_funcs as _if
 from openpnm.utils import Docorator
+import copy
 docstr = Docorator()
 
 
@@ -176,12 +177,12 @@ class Primary_Drainage(Algorithm):
         Ts = self.project.network.find_neighbor_throats(pores=self['pore.bc.inlet'])
         t_start = self['throat.order'][Ts]
 
-
         t_inv, p_inv, p_inv_t, order, t_ref = \
             _run_accelerated(
                 t_start=t_start,
                 t_sorted=self['throat.sorted'],
                 t_order=self['throat.order'],
+                t_qs_order=self['throat.qs_order'],
                 t_inv=self['throat.invasion_sequence'],
                 p_inv=self['pore.invasion_sequence'],
                 p_inv_t=np.zeros_like(self['pore.invasion_sequence']),
@@ -206,7 +207,7 @@ class Primary_Drainage(Algorithm):
 
     def get_phase(self):
         r"""
-        Get the invaded phase object
+        Get the invaded/wetting phase object
         """
         project = self.project
         for item in project.phases:
@@ -219,11 +220,19 @@ class Primary_Drainage(Algorithm):
         self['pore.invasion_sequence'][self['pore.bc.inlet']] = 0
         phase = self.get_phase()
         self['throat.entry_pressure'] = _if.MSP_prim_drainage(phase, throat_diameter = throat_diameter)
+        #Assigning values to invade automatically the boundary throats
+        Ts = self.project.network.find_neighbor_throats(pores=self['pore.bc.inlet'])
+        self['throat.entry_pressure'][ Ts ] = 0
+        Ts = self.project.network.find_neighbor_throats(pores=self['pore.bc.outlet'])
+        self['throat.entry_pressure'][ Ts ] = 0
         # Generated indices into t_entry giving a sorted list
         self['throat.sorted'] = np.argsort(self['throat.entry_pressure'], axis=0)
         self['throat.order'] = 0
         self['throat.order'][self['throat.sorted']] = np.arange(0, self.Nt)
-
+        self['throat.qs_order'] = 0
+        pc_unique = np.unique(self['throat.entry_pressure'][self['throat.sorted']])
+        for i in range(len(pc_unique)):
+            self['throat.qs_order'][self['throat.entry_pressure'] == pc_unique[i]] = i
 
     def postprocessing(self, p_vals=None, points = None, p_max=None, p_min = None):
         r"""
@@ -353,16 +362,118 @@ class Primary_Drainage(Algorithm):
         cluster_info['throat.center'] = cluster_center_info_t.T
         cluster_info['throat.corner'] = cluster_corner_info_t
 
+        #Creating index list per element
+        for item  in ['pore', 'throat']:
+            indexinfo = np.concatenate( (cluster_info[item +'.corner'].flatten(), cluster_info[item +'.center']))
+            cluster_info[item + '.index'] = np.unique(indexinfo)
 
+        #Creating general list
+        indexinfo = np.concatenate( (cluster_info['pore.index'], cluster_info['throat.index']) )
+        cluster_info['index_list'] = np.sort(np.unique(indexinfo))
 
         return p_vals, invasion_info, cluster_info
 
-    def set_wp_presence(self, pore_center, pore_corner, throat_center, throat_corner):
+    def postprocessing2(self, mode = 'pressure', inv_vals = None):
         r"""
-        Set presence on pores and throats and put on the Algorithm object
+        Get information about the location of phases and clusters.
+        For this procedure inlet pores that do not have an invaded neighbor throat are considered as uninvaded
+        Assumes the wetting phase is at least in one corner of each element.
+
+        Parameters:
+        ------------
+        mode: 'pressure' or 'sequence'. Related to the invasion pressure or the invasion sequence
+        inv_vals: Number or numpy array. Invasion pressure or invasion sequence, depending of the mode
         """
+        if mode not in ['pressure', 'sequence']:
+            raise Exception('Just two mode optiones: pressure or sequence')
 
+        elements = ['pore', 'throat']
+        locations = ['center', 'corner']
+        phase = self.get_phase() #wetting phase
 
+        #Converting in array if inv_vals is a number:
+        if isinstance(inv_vals, (int, float)):
+            inv_vals = [inv_vals]
+
+        #Determining if interface can exist (independent from the invasion status)
+        mask_interface = {}
+        for item in elements:
+            theta = phase[f"{item}.contact_angle"]
+            beta = self.network[f'{item}.half_corner_angle']
+            mask_interface[item] = _if.wp_in_corners(beta = beta, theta = theta)
+
+        status_index = 1
+        results = {}
+
+        for val in inv_vals:
+            status_str = 'status_' + str(status_index)
+            results[status_str] = {'invasion_info': {},
+                                   'cluster_info': {}}
+            nwp_loc = {}
+            wp_loc = {}
+            for item in elements:
+                #Obtaining contact angle data (array N * 1)
+                nwp_center = self[f'{item}.invasion_{mode}'] <= val #True if the nwp is in.
+                if item == 'throat':
+                    if np.any(nwp_center):
+                        results[status_str]['invasion_pressure'] = max(self[f'{item}.invasion_pressure'][nwp_center])
+                    else:
+                        results[status_str]['invasion_pressure'] =  0
+                mask_inv =  np.tile(nwp_center,(3,1)).T
+                #If the center nwp is True and interface is False, then corner nwp is True. Only case
+                nwp_corner = mask_inv & ~mask_interface[item]
+                #Saving info of the NON WETTING PHASE
+                nwp_loc[f'{item}.center'] = nwp_center
+                wp_loc[f'{item}.center'] = ~nwp_center
+                nwp_loc[f'{item}.corner'] = nwp_corner
+                wp_loc[f'{item}.corner'] = ~nwp_corner
+            #Para inlet conduits, el poro interno del conduite tendrá oleo sí y solo sí el numero de gargantas es mayor a 1. self['pore.bc.inlet']
+            for i in range(self.network.Np):
+                if self['pore.bc.inlet'][i]:
+                    p = self.network.find_neighbor_pores(i)[0] #internal pore
+                    t_list = self.network.find_neighbor_throats(p) #neighbot throats
+                    if np.sum( nwp_loc['throat.center'][t_list]) <= 1:
+                        #Solo la garganta de contorno esta con oleo. Por tanto llenar todo con agua
+                        t = self.network.find_neighbor_throats(i)[0]
+                        for loc in locations:
+                            nwp_loc[f'pore.{loc}'][[p, i]] = False
+                            nwp_loc[f'throat.{loc}'][t] = False
+                            wp_loc[f'pore.{loc}'][[p, i]] = True
+                            wp_loc[f'throat.{loc}'][t]= True
+            cluster_info = _if.cluster_advanced(network = self.network, phase_locations = nwp_loc, corner = True, layer = False)
+            cluster_info_wp = _if.cluster_advanced(network = self.network, phase_locations = wp_loc, corner = True, layer = False)
+            if len(cluster_info_wp['index_list']) > 2:
+                #Tenemos más de un cluster de wp. Asignar numeros negativos
+                wp_list = np.delete(cluster_info_wp['index_list'],0)
+                cluster_info['index_list'] = np.delete(cluster_info['index_list'],0)
+                #Deleting zero index
+                for item in elements:
+                    retire_zero = False
+                    for loc in locations:
+                        mask_0 = cluster_info[f'{item}.{loc}'] == 0
+                        if np.any(mask_0):
+                            retire_zero = True
+                    if retire_zero:
+                        cluster_info[f'{item}.index'] = np.delete(cluster_info[f'{item}.index'], 0)
+                #Assigning new index to the wetting phase clusters
+                for index in wp_list:
+                    for item in elements:
+                        add_index = False
+                        for loc in locations:
+                            mask = cluster_info_wp[f'{item}.{loc}'] == index
+                            if np.any(mask):
+                                add_index = True
+                            cluster_info[f'{item}.{loc}'][mask] = -index
+                        if add_index:
+                            cluster_info[f'{item}.index'] = np.append(cluster_info[f'{item}.index'], -index)
+                    cluster_info['index_list'] = np.append(cluster_info['index_list'], -index )
+            #Saving results. Invasion info is TRUE if the WETTING PHASE is present
+            for item in elements:
+                for loc in locations:
+                    results[status_str]['invasion_info'][f'{item}.{loc}'] = wp_loc[f'{item}.{loc}']
+            results[status_str]['cluster_info'] = copy.deepcopy(cluster_info)
+            status_index += 1
+        return results
 
     def _set_wp_corner_presence(self, pore = True, throat = True):
         r"""
@@ -395,7 +506,7 @@ class Primary_Drainage(Algorithm):
 
 
 @njit
-def _run_accelerated(t_start, t_sorted, t_order, t_inv, p_inv, p_inv_t,
+def _run_accelerated(t_start, t_sorted, t_order, t_qs_order, t_inv, p_inv, p_inv_t,
                      conns, idx, indptr, n_steps):  # pragma: no cover
     r"""
     Numba-jitted run method for InvasionPercolation class.
@@ -405,7 +516,8 @@ def _run_accelerated(t_start, t_sorted, t_order, t_inv, p_inv, p_inv_t,
 
     t_start: t_order, but just for the throats connected to the inlet pores
     t_sorted: Array with the throat indexes. The index of throat with the lower entry pressure is first. Then, the index of the second lower and so on.
-    t_order: Ordinary number related to the throat entry pressure
+    t_order: Ordinary number related to the throat entry pressure. Unique for each throat
+    t_qs_order: Similar to t_order. All throats with the same entry pressure shares the same t_qs_order
     t_inv: Ascending order for the throat entry pressure
     p_inv: Ascending order for the pore entry pressure
     p_inv_t: Null matrix with the same size as p_inv
@@ -452,9 +564,11 @@ def _run_accelerated(t_start, t_sorted, t_order, t_inv, p_inv, p_inv_t,
         #--------------
         if len(order) == 1:
             t_ref.append(t_next)
-        elif t_order[t_ref[-1]] > t_order[t_next]:
+        elif t_qs_order[t_ref[-1]] >= t_qs_order[t_next]:
+            #Still at the same quasistatic state
             t_ref.append(t_ref[-1])
         else:
+            #New quasistatic state
             t_ref.append(t_next)
             count +=1
         #--------------

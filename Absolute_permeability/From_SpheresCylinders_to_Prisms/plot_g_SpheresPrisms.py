@@ -13,7 +13,7 @@ import math as m
 
 #importing functions for other file
 import sys
-sys.path.insert(1, '/home/cesar/OpenPNM_files/_funcs')
+sys.path.insert(1, '/home/cesar/OpenPNM_files/mestrado/_funcs')
 import _algorithm_class as _alg
 import _conductance_funcs as _cf
 import _invasion_funcs as _if
